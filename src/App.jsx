@@ -144,6 +144,9 @@ export default function App() {
       result.questionsAnswered,
       result.level || '6'
     );
+    if (useStore.getState().syncWarning) {
+      showToast('Progress will sync when your connection is back', '#b45309');
+    }
     setSessionResult(result);
     setScreen('session_end');
   }
@@ -645,9 +648,11 @@ function PracticeScreen({ setScreen, subject, subj, onEnd, onLoginRequired }) {
               if (!qId) return;
               try {
                 const { reportQuestion } = await import('./lib/supabase_sync');
-                await reportQuestion(qId);
-                // Also add to answeredCorrectly so it never appears again this session
-                useStore.getState().recordAnswer(subject, q.topic, String(q.question_level||'6'), q.difficulty||'easy', q.category||'', true, false, qId, q.answer, q.answer, 0);
+                const st = useStore.getState();
+                const res = await reportQuestion(qId, st.user?.supabaseId, st.sessionToken, 'student_report');
+                if (!res?.success) throw new Error(res?.error || 'report failed');
+                // Hide it for this student only — does NOT count as an answer
+                st.skipQuestion(qId);
                 showToast('Question reported — thank you! 👍', '#6b7280');
                 loadNext();
               } catch(e) {
@@ -820,14 +825,18 @@ function ParentChangePin({ setScreen, goHome }) {
   const [confPin, setConfPin] = useState('');
   const [err,     setErr]     = useState('');
 
-  function handleSave(e) {
+  async function handleSave(e) {
     e.preventDefault();
     setErr('');
     if (newPin.length < 6)  { setErr('Please enter a full 6-digit PIN.'); return; }
     if (confPin.length < 6) { setErr('Please confirm your PIN.'); return; }
     if (newPin !== confPin) { setErr('PINs do not match.'); return; }
     const s = useStore.getState();
-    useStore.setState({ user: { ...s.user, parentPin: newPin, parentPinChanged: true } });
+    const { changeParentPin } = await import('./lib/supabase_sync');
+    const res = await changeParentPin(s.user?.supabaseId, s.sessionToken, newPin);
+    if (!res.success) { setErr('Could not save the PIN. Check your internet and try again.'); return; }
+    // The PIN is stored scrambled on the server; never keep it in the browser
+    useStore.setState({ user: { ...s.user, parentPin: undefined, parentPinChanged: true } });
     showToast('PIN set successfully! 🔒', '#059669');
     setScreen('parent_dash');
   }
