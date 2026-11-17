@@ -57,6 +57,10 @@ export const useStore = create(
   persist(
     (set, get) => ({
 
+      // Sessions whose save to Supabase failed; retried at the next session end
+      pendingSessions: [],
+      syncWarning:     false,
+
       // ── User ────────────────────────────────────────────────
       user:           null,
       isLoggedIn:     false,
@@ -93,20 +97,19 @@ export const useStore = create(
       sessionToken: null,
 
       // ── Auth ────────────────────────────────────────────────
-      login: async (userData) => {
-        // Generate unique session token
-        const token = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36);
+      // `token` is the session token issued by the server at sign-in.
+      login: async (userData, token) => {
+        // Never keep a password or PIN hanging around in the browser
+        if (userData) { delete userData.password; }
 
-        // Save token to Supabase if student has supabaseId
-        if (userData.supabaseId) {
+        if (userData.supabaseId && token) {
           try {
-            const { setSessionToken, fetchStudentSessions, fetchAnsweredHistory } = await import('./supabase_sync');
-            await setSessionToken(userData.supabaseId, token);
+            const { fetchStudentSessions, fetchAnsweredHistory } = await import('./supabase_sync');
 
             // Fetch sessions AND the full answered-question history in parallel
             const [sessions, answeredHistory] = await Promise.all([
-              fetchStudentSessions(userData.supabaseId),
-              fetchAnsweredHistory(userData.supabaseId),
+              fetchStudentSessions(userData.supabaseId, token),
+              fetchAnsweredHistory(userData.supabaseId, token),
             ]);
             const lastSession = sessions.length > 0 ? {
               questionsAnswered: sessions[0].questionsAnswered,
@@ -181,7 +184,7 @@ export const useStore = create(
         if (s2.user?.supabaseId) {
           try {
             const { clearSessionToken } = await import('./supabase_sync');
-            await clearSessionToken(s2.user.supabaseId);
+            await clearSessionToken(s2.user.supabaseId, s2.sessionToken);
           } catch(e) { console.error('clearSessionToken failed:', e); }
         }
         set({
@@ -280,49 +283,48 @@ export const useStore = create(
 
       // ── Register ─────────────────────────────────────────────
       register: async (userData) => {
-        const pin         = String(Math.floor(100000 + Math.random() * 900000));
-        const trialEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        const email = userData.email.trim().toLowerCase();
+        const result = await registerStudent({
+          name:     userData.name,
+          email,
+          grade:    userData.grade,
+          city:     userData.city || '',
+          password: userData.password,
+        });
 
+        // No silent local-only accounts any more: if the server says no, tell the student
+        if (!result.success) {
+          const e = new Error(result.error || 'failed');
+          e.code = result.error || 'failed';
+          throw e;
+        }
+
+        const st = result.student;
         const newUser = {
-          id:                 Date.now() + '',
-          name:               userData.name,
-          email:              userData.email.trim().toLowerCase(),
-          grade:              userData.grade,
-          city:               userData.city || '',
-          password:           userData.password,
-          parentPin:          pin,
+          id:                 st.id,
+          supabaseId:         st.id,
+          name:               st.full_name,
+          email:              st.email,
+          grade:              st.grade,
+          city:               st.city || '',
+          // Shown once on the "welcome" screen; replaced when the parent sets a private PIN
+          parentPin:          result.parentPin,
           parentPinChanged:   false,
           streak:             0,
           lastPracticeDate:   null,
-          supabaseId:         null,
           schoolId:           userData.schoolId || null,
           shareData:          userData.shareData || false,
-          trialEndsAt,
-          subscriptionStatus: 'trial',
+          trialEndsAt:        st.trial_ends_at,
+          subscriptionStatus: st.subscription_status || 'trial',
         };
+        const token = result.sessionToken;
 
-        const result = await registerStudent(newUser);
-        if (result.success && result.student?.id) {
-          newUser.supabaseId = result.student.id;
-          if (userData.schoolId && userData.shareData) {
-            await linkStudentToSchool(result.student.id, userData.schoolId, 'self');
-          }
-        }
-
-        // Generate session token for single login enforcement
-        const token = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36);
-        newUser.sessionToken = token;
-
-        // Save session token to Supabase
-        if (newUser.supabaseId) {
-          try {
-            const { setSessionToken } = await import('./supabase_sync');
-            await setSessionToken(newUser.supabaseId, token);
-          } catch(e) { console.error('setSessionToken on register failed:', e); }
+        if (userData.schoolId && userData.shareData) {
+          await linkStudentToSchool(st.id, token, userData.schoolId);
         }
 
         set({
-          user:         newUser,
+          user:         { ...newUser, sessionToken: token },
           isLoggedIn:   true,
           guestCounts:  {},
           sessionToken: token,
@@ -330,7 +332,7 @@ export const useStore = create(
           lastSession:    null,
         });
 
-        return { user: newUser, pin };
+        return { user: newUser, pin: result.parentPin };
       },
 
       // ── Set questions cache ──────────────────────────────────
@@ -352,6 +354,39 @@ export const useStore = create(
       }),
 
       // ── Record answer ────────────────────────────────────────
+      // Hide a question for this student without counting it as an answer
+      // (used by the Report button — must not change scores or rewards)
+      skipQuestion: (questionId) => {
+        if (!questionId) return;
+        set((st) => ({ answeredCorrectly: { ...st.answeredCorrectly, [questionId]: true } }));
+      },
+
+      // Retry sessions that failed to save earlier
+      flushPending: async () => {
+        const s = get();
+        const queue = s.pendingSessions || [];
+        if (!s.isLoggedIn || !s.user?.supabaseId || queue.length === 0) return;
+        const left = [];
+        for (const item of queue) {
+          if (item.studentId !== s.user.supabaseId) { left.push(item); continue; }
+          try {
+            let sessionId = item.sessionId;
+            if (!sessionId) {
+              const r = await saveSession({ ...item.session, token: s.sessionToken });
+              sessionId = r?.success ? r.sessionId : null;
+            }
+            if (!sessionId) { left.push(item); continue; }
+            if (item.answers?.length) {
+              const r = await saveAnswers(item.studentId, s.sessionToken, sessionId, item.answers);
+              if (!r?.success) { left.push({ ...item, sessionId }); continue; }
+            }
+          } catch (err) {
+            left.push(item);
+          }
+        }
+        set({ pendingSessions: left, syncWarning: left.length > 0 });
+      },
+
       recordAnswer: (
         subject, topic, questionLevel, difficulty,
         category, isCorrect, isLate, questionId,
@@ -456,9 +491,12 @@ export const useStore = create(
 
         // Only save to Supabase if at least 1 question was answered
         if (s.isLoggedIn && s.user?.supabaseId && questionsAnswered > 0) {
-          // First save session to get session_id
-          const sessionResult = await saveSession({
+          // Retry anything that failed to save in an earlier session
+          await get().flushPending();
+
+          const sessionPayload = {
             studentId:        s.user.supabaseId,
+            token:            s.sessionToken,
             subject,
             questionsAnswered,
             correct,
@@ -468,21 +506,29 @@ export const useStore = create(
             hardAttempted,
             durationSeconds,
             level: level || '6',
-          }).catch(err => { console.error('Session save failed:', err); return null; });
+          };
 
-          // Then bulk save answers with session_id.
-          // AWAITED (not fire-and-forget): endSession is called right when a
-          // student finishes practising and may switch devices/browsers
-          // moments later. An un-awaited save could get cut off mid-flight
-          // by the tab closing, silently losing that session's answer rows
-          // — which then makes rewards/history look wrong on the next
-          // device until those rows exist in Supabase.
-          if (sessionResult?.sessionId && answers.length > 0) {
-            try {
-              await saveAnswers(s.user.supabaseId, sessionResult.sessionId, answers);
-            } catch (err) {
-              console.error('Answers save failed:', err);
+          // Save the session, then its answers. AWAITED so a student who
+          // switches device right after finishing does not lose rows.
+          // Any failure is retried once, then queued and retried next time.
+          let saved = await saveSession(sessionPayload).catch(() => null);
+          if (!saved?.success) saved = await saveSession(sessionPayload).catch(() => null);
+
+          let failed = null;
+          if (!saved?.success || !saved.sessionId) {
+            failed = { studentId: s.user.supabaseId, session: sessionPayload, answers };
+          } else if (answers.length > 0) {
+            let r = await saveAnswers(s.user.supabaseId, s.sessionToken, saved.sessionId, answers).catch(() => null);
+            if (!r?.success) r = await saveAnswers(s.user.supabaseId, s.sessionToken, saved.sessionId, answers).catch(() => null);
+            if (!r?.success) {
+              failed = { studentId: s.user.supabaseId, sessionId: saved.sessionId, answers };
             }
+          }
+          if (failed) {
+            set((st) => ({
+              pendingSessions: [...(st.pendingSessions || []), failed].slice(-20),
+              syncWarning: true,
+            }));
           }
         }
 
@@ -535,6 +581,7 @@ export const useStore = create(
         // re-ran computeRewardState until the next full login() call.
         answeredRows:      s.answeredRows,
         rewardState:       s.rewardState,
+        pendingSessions:   s.pendingSessions,
       }),
     }
   )

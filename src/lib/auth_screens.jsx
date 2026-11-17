@@ -157,7 +157,13 @@ export function SignupScreen({ setScreen, goHome }) {
       });
       setScreen('signup_done');
     } catch(err) {
-      setErr('Something went wrong. Please try again.');
+      const msgs = {
+        email_taken:   'An account with this email already exists. Please sign in instead.',
+        weak_password: 'Password must be at least 6 characters.',
+        invalid_input: 'Please check your name and email.',
+        network:       'Could not reach the server. Check your internet and try again.',
+      };
+      setErr(msgs[err?.code] || 'Something went wrong. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -311,50 +317,38 @@ function StudentLoginTab({ setScreen, goHome }) {
 
     setLoading(true);
     try {
-      // Check localStorage first
-      let foundUser = user;
+      const { loginStudent } = await import('./supabase_sync');
+      const res = await loginStudent(email.trim(), pass);
 
-      // If not in localStorage or email doesn't match — fetch from Supabase
-      if (!foundUser || foundUser.email.toLowerCase() !== email.trim().toLowerCase()) {
-        const { fetchStudentByEmail } = await import('./supabase_sync');
-        const student = await fetchStudentByEmail(email.trim());
-
-        if (!student) {
-          setErr('No account found with this email. Please register first.');
-          setLoading(false);
-          return;
-        }
-
-        if (student.password_hash !== pass) {
-          setErr('Incorrect password. Please try again.');
-          setLoading(false);
-          return;
-        }
-
-        // Rebuild user object from Supabase data
-        foundUser = {
-          id:               student.id,
-          supabaseId:       student.id,
-          name:             student.full_name,
-          email:            student.email,
-          grade:            student.grade,
-          city:             student.city || '',
-          password:         student.password_hash,
-          parentPin:        student.pin,
-          parentPinChanged: false,
-          streak:           0,
-          lastPracticeDate: null,
+      if (!res.success) {
+        const msgs = {
+          invalid: 'Email or password is incorrect. Please try again.',
+          locked:  'Too many wrong attempts. Please wait 15 minutes and try again.',
+          network: 'Could not reach the server. Check your internet and try again.',
         };
-      } else {
-        // Found in localStorage — verify password
-        if (foundUser.password !== pass) {
-          setErr('Incorrect password. Please try again.');
-          setLoading(false);
-          return;
-        }
+        setErr(msgs[res.error] || 'Something went wrong. Please try again.');
+        setLoading(false);
+        return;
       }
 
-      await useStore.getState().login(foundUser);
+      const st = res.student;
+      const prevUser = useStore.getState().user;
+      const foundUser = {
+        id:                 st.id,
+        supabaseId:         st.id,
+        name:               st.full_name,
+        email:              st.email,
+        grade:              st.grade,
+        city:               st.city || '',
+        parentPinChanged:   !!st.parent_pin_changed,
+        trialEndsAt:        st.trial_ends_at,
+        subscriptionStatus: st.subscription_status || 'trial',
+        // Keep the streak if this is the same student on the same device
+        streak:             (prevUser && prevUser.email === st.email) ? (prevUser.streak || 0) : 0,
+        lastPracticeDate:   (prevUser && prevUser.email === st.email) ? (prevUser.lastPracticeDate || null) : null,
+      };
+
+      await useStore.getState().login(foundUser, res.sessionToken);
       showToast(`Welcome back, ${foundUser.name?.split(' ')[0]}! 👋`, '#4338ca');
       goHome();
     } catch (err) {
@@ -411,48 +405,39 @@ function ParentLoginTab({ setScreen, goHome }) {
 
     setLoading(true);
     try {
-      let foundUser = user;
+      const { loginParent } = await import('./supabase_sync');
+      const res = await loginParent(email.trim(), pin);
 
-      // If not in localStorage — fetch from Supabase
-      if (!foundUser || foundUser.email.toLowerCase() !== email.trim().toLowerCase()) {
-        const { fetchStudentByEmail } = await import('./supabase_sync');
-        const student = await fetchStudentByEmail(email.trim());
-
-        if (!student) {
-          setErr('No student found with this email.');
-          setLoading(false);
-          return;
-        }
-
-        if (pin !== student.pin) {
-          setErr('Incorrect PIN. Please try again.');
-          setLoading(false);
-          return;
-        }
-
-        foundUser = {
-          id:               student.id,
-          supabaseId:       student.id,
-          name:             student.full_name,
-          email:            student.email,
-          grade:            student.grade,
-          city:             student.city || '',
-          password:         student.password_hash,
-          parentPin:        student.pin,
-          parentPinChanged: false,
-          streak:           0,
-          lastPracticeDate: null,
+      if (!res.success) {
+        const msgs = {
+          invalid: 'Email or PIN is incorrect. Please try again.',
+          locked:  'Too many wrong attempts. Please wait 15 minutes and try again.',
+          network: 'Could not reach the server. Check your internet and try again.',
         };
-      } else {
-        if (pin !== foundUser.parentPin) {
-          setErr('Incorrect PIN. Please try again.');
-          setLoading(false);
-          return;
-        }
+        setErr(msgs[res.error] || 'Something went wrong. Please try again.');
+        setLoading(false);
+        return;
       }
 
+      const st = res.student;
+      const prevUser = useStore.getState().user;
+      const foundUser = {
+        id:                 st.id,
+        supabaseId:         st.id,
+        name:               st.full_name,
+        email:              st.email,
+        grade:              st.grade,
+        city:               st.city || '',
+        parentPinChanged:   !!st.parent_pin_changed,
+        trialEndsAt:        st.trial_ends_at,
+        subscriptionStatus: st.subscription_status || 'trial',
+        // Keep the streak if this is the same student on the same device
+        streak:             (prevUser && prevUser.email === st.email) ? (prevUser.streak || 0) : 0,
+        lastPracticeDate:   (prevUser && prevUser.email === st.email) ? (prevUser.lastPracticeDate || null) : null,
+      };
+
       // Store found user then go to parent dashboard
-      await useStore.getState().login(foundUser);
+      await useStore.getState().login(foundUser, res.sessionToken);
       if (!foundUser.parentPinChanged) { setScreen('parent_pin'); }
       else { setScreen('parent_dash'); }
     } catch(err) {

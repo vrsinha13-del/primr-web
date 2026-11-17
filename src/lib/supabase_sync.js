@@ -1,99 +1,80 @@
 // src/lib/supabase_sync.js
-// Handles all Supabase read/write operations for PRIMR
-// 1. Registration — save student to students table
-// 2. Session end — save to session_logs table
-// 3. Question fetch — load from question_bank table
+// All Supabase reads/writes for PRIMR.
+// Student data is NEVER read or written from the tables directly any more.
+// Every call goes through a secure database function (see step1_student_functions.sql)
+// and carries the student's id + session token, which the server checks.
 
 import { supabase } from './supabase';
 
-// ── 1. REGISTRATION ────────────────────────────────────────────────────────
-// Called when student completes signup form
-// Saves to Supabase students table
+// Turn a server reply from register/login into a plain result object
+function authResult(data, error) {
+  if (error) return { success: false, error: error.message || 'network' };
+  if (!data || data.ok !== true) return { success: false, error: data?.error || 'failed' };
+  return { success: true, student: data.student, sessionToken: data.session_token, parentPin: data.parent_pin };
+}
 
-export async function registerStudent(userData) {
+// ── 1. REGISTER / SIGN IN ───────────────────────────────────────────────────
+export async function registerStudent({ name, email, grade, city, password }) {
   try {
-    const { data, error } = await supabase
-      .from('students')
-      .insert({
-        full_name:           userData.name,
-        email:               userData.email,
-        grade:               userData.grade,
-        city:                userData.city     || null,
-        country:             'India',
-        password_hash:       userData.password,
-        pin:                 userData.parentPin,
-        registered_by:       'self',
-        is_active:           true,
-        is_verified:         false,
-        trial_ends_at:       userData.trialEndsAt,
-        subscription_status: 'trial',
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Registration error:', error);
-      // Don't block signup — save locally even if Supabase fails
-      return { success: false, error: error.message };
-    }
-
-    return { success: true, student: data };
+    const { data, error } = await supabase.rpc('register_student', {
+      p_name: name, p_email: email, p_grade: grade, p_city: city || '', p_password: password,
+    });
+    return authResult(data, error);
   } catch (err) {
     console.error('Registration exception:', err);
-    return { success: false, error: err.message };
+    return { success: false, error: 'network' };
+  }
+}
+
+export async function loginStudent(email, password) {
+  try {
+    const { data, error } = await supabase.rpc('login_student', { p_email: email, p_password: password });
+    return authResult(data, error);
+  } catch (err) {
+    console.error('loginStudent exception:', err);
+    return { success: false, error: 'network' };
+  }
+}
+
+export async function loginParent(email, pin) {
+  try {
+    const { data, error } = await supabase.rpc('login_parent', { p_email: email, p_pin: pin });
+    return authResult(data, error);
+  } catch (err) {
+    console.error('loginParent exception:', err);
+    return { success: false, error: 'network' };
+  }
+}
+
+export async function changeParentPin(studentId, token, newPin) {
+  try {
+    const { data, error } = await supabase.rpc('change_parent_pin', {
+      p_student: studentId, p_token: token, p_new_pin: newPin,
+    });
+    return { success: !error && data === true };
+  } catch (err) {
+    return { success: false };
   }
 }
 
 // ── 2. SESSION SAVE ────────────────────────────────────────────────────────
-// Called when student taps Practice Later
-// Saves summary to session_logs table
-
 export async function saveSession({
-  studentId,
-  subject,
-  questionsAnswered,
-  correct,
-  wrong,
-  easyAttempted,
-  mediumAttempted,
-  hardAttempted,
-  durationSeconds,
-  level,
+  studentId, token, subject, questionsAnswered, correct, wrong,
+  easyAttempted, mediumAttempted, hardAttempted, durationSeconds, level,
 }) {
-  if (!studentId) return { success: false, error: 'No student ID' };
-
+  if (!studentId || !token) return { success: false, error: 'No student session' };
   try {
-    const total    = questionsAnswered || 0;
-    const cor      = correct  || 0;
-    const wrg      = wrong    || 0;
-    const scorePct = total > 0 ? Math.round((cor / total) * 100) : 0;
-
-    const { data, error } = await supabase
-      .from('session_logs')
-      .insert({
-        student_id:        studentId,
-        subject,
-        question_level:    level || '6',
-        total_attempted:   total,
-        total_correct:     cor,
-        total_wrong:       wrg,
-        score_pct:         scorePct,
-        easy_attempted:    easyAttempted   || 0,
-        medium_attempted:  mediumAttempted || 0,
-        hard_attempted:    hardAttempted   || 0,
-        duration_seconds:  durationSeconds || 0,
-        started_at:        new Date(Date.now() - (durationSeconds||0)*1000).toISOString(),
-        ended_at:          new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-
-    if (error) {
+    const { data, error } = await supabase.rpc('save_session', {
+      p_student: studentId, p_token: token, p_subject: subject, p_level: level || '6',
+      p_total: questionsAnswered || 0, p_correct: correct || 0, p_wrong: wrong || 0,
+      p_easy: easyAttempted || 0, p_medium: mediumAttempted || 0, p_hard: hardAttempted || 0,
+      p_duration: durationSeconds || 0,
+    });
+    if (error || !data) {
       console.error('Session save error:', error);
-      return { success: false, error: error.message };
+      return { success: false, error: error?.message || 'rejected' };
     }
-
-    return { success: true, sessionId: data?.id };
+    return { success: true, sessionId: data };
   } catch (err) {
     console.error('Session save exception:', err);
     return { success: false, error: err.message };
@@ -101,16 +82,10 @@ export async function saveSession({
 }
 
 // ── 3. SAVE STUDENT ANSWERS ─────────────────────────────────────────────────
-// Bulk insert all answers from a session into student_answers table
-// Only called for Supabase questions (UUID IDs)
-
-export async function saveAnswers(studentId, sessionId, answers) {
-  if (!studentId || !sessionId || !answers.length) return { success: false };
-
+export async function saveAnswers(studentId, token, sessionId, answers) {
+  if (!studentId || !token || !sessionId || !answers?.length) return { success: false };
   try {
     const rows = answers.map(a => ({
-      student_id:     studentId,
-      session_id:     sessionId,
       question_id:    a.question_id,
       subject:        a.subject,
       topic:          a.topic,
@@ -123,16 +98,19 @@ export async function saveAnswers(studentId, sessionId, answers) {
       answered_at:    a.answered_at,
     }));
 
-    const { error } = await supabase
-      .from('student_answers')
-      .insert(rows);
-
-    if (error) {
-      console.error('saveAnswers error:', error);
-      return { success: false, error: error.message };
+    // The server accepts up to 500 rows per call
+    let saved = 0;
+    for (let i = 0; i < rows.length; i += 500) {
+      const { data, error } = await supabase.rpc('save_answers', {
+        p_student: studentId, p_token: token, p_session: sessionId, p_rows: rows.slice(i, i + 500),
+      });
+      if (error || typeof data !== 'number' || data < 0) {
+        console.error('saveAnswers error:', error);
+        return { success: false, error: error?.message || 'rejected' };
+      }
+      saved += data;
     }
-
-    return { success: true, count: rows.length };
+    return { success: true, count: saved };
   } catch (err) {
     console.error('saveAnswers exception:', err);
     return { success: false, error: err.message };
@@ -140,19 +118,12 @@ export async function saveAnswers(studentId, sessionId, answers) {
 }
 
 // ── 3b. FETCH ANSWERED QUESTION HISTORY ─────────────────────────────────────
-// Rebuilds answeredCorrectly / answeredWrongly from the full student_answers
-// history, and returns the raw rows so the caller (store.js) can also replay
-// them through updateRecord() to rebuild topicRecords — meaning difficulty
-// level and mastery status survive a login, not just question-level dedup.
-// Called on login. Without this, all local trackers reset to {} on every
-// login and Supabase's saved answer history was never read back, so students
-// could be served already-answered questions AND get dropped back to Easy
-// difficulty even after mastering a topic.
-// Paginated to avoid Supabase's 1000-row default limit for active students.
-
-export async function fetchAnsweredHistory(studentId) {
+// Rebuilds answeredCorrectly / answeredWrongly from the student's full answer
+// history, and returns the raw rows so store.js can rebuild topic records.
+// Paginated to avoid Supabase's 1000-row default limit.
+export async function fetchAnsweredHistory(studentId, token) {
   const result = { answeredCorrectly: {}, answeredWrongly: {}, rows: [] };
-  if (!studentId) return result;
+  if (!studentId || !token) return result;
 
   try {
     let allRows = [];
@@ -161,40 +132,31 @@ export async function fetchAnsweredHistory(studentId) {
 
     while (true) {
       const { data, error } = await supabase
-        .from('student_answers')
-        .select('question_id, subject, topic, difficulty, question_level, is_correct, time_taken_sec, answered_at')
-        .eq('student_id', studentId)
-        .order('answered_at', { ascending: true })
+        .rpc('fetch_my_answers', { p_student: studentId, p_token: token })
         .range(from, from + PAGE - 1);
 
       if (error) {
         console.error('fetchAnsweredHistory error:', error);
         break;
       }
-
       if (!data || data.length === 0) break;
       allRows = [...allRows, ...data];
-      if (data.length < PAGE) break;  // last page
+      if (data.length < PAGE) break;
       from += PAGE;
     }
 
     result.rows = allRows;
 
-    // Process oldest-to-newest so a later correct attempt always overrides
-    // an earlier wrong one for the same question.
+    // Oldest to newest: a later correct attempt overrides an earlier wrong one.
     for (const row of allRows) {
       if (!row.question_id) continue;
       if (row.is_correct) {
         result.answeredCorrectly[row.question_id] = true;
         delete result.answeredWrongly[row.question_id];
       } else if (!result.answeredCorrectly[row.question_id]) {
-        // Baseline 0: eligible for retry once WRONG_RETRY_AFTER more
-        // questions are answered in that topic in THIS new session, since
-        // topicRecords' per-topic counters also reset fresh on login.
         result.answeredWrongly[row.question_id] = 0;
       }
     }
-
     return result;
   } catch (err) {
     console.error('fetchAnsweredHistory exception:', err);
@@ -372,23 +334,15 @@ export async function fetchSchools(city) {
 }
 
 // ── 7. LINK STUDENT TO SCHOOL ───────────────────────────────────────────────
-// Creates a school_students row when student opts to share with school
-// Status = pending_approval — school admin must accept
-
-export async function linkStudentToSchool(studentId, schoolId, addedBy = 'self') {
+// Creates a pending request; the school admin must accept it.
+export async function linkStudentToSchool(studentId, token, schoolId) {
   try {
-    const { error } = await supabase
-      .from('school_students')
-      .insert({
-        student_id: studentId,
-        school_id:  schoolId,
-        status:     'pending_approval',
-        added_by:   addedBy,
-      });
-
-    if (error) {
+    const { data, error } = await supabase.rpc('link_student_school', {
+      p_student: studentId, p_token: token, p_school: schoolId,
+    });
+    if (error || data !== true) {
       console.error('linkStudentToSchool error:', error);
-      return { success: false, error: error.message };
+      return { success: false, error: error?.message || 'rejected' };
     }
     return { success: true };
   } catch (err) {
@@ -397,40 +351,16 @@ export async function linkStudentToSchool(studentId, schoolId, addedBy = 'self')
   }
 }
 
-// ── 8. FETCH STUDENT BY EMAIL ──────────────────────────────────────────────
-// Used for sign in — fetches student from Supabase by email
-
-export async function fetchStudentByEmail(email) {
-  try {
-    const { data, error } = await supabase
-      .from('students')
-      .select('*')
-      .eq('email', email.toLowerCase())
-      .eq('is_active', true)
-      .single();
-
-    if (error) { console.error('fetchStudentByEmail error:', error); return null; }
-    return data;
-  } catch (err) {
-    console.error('fetchStudentByEmail exception:', err);
-    return null;
-  }
-}
-
 // ── 10. REPORT QUESTION ─────────────────────────────────────────────────────
-// Marks a question as inactive in Supabase when reported by student
-// Also prevents it from appearing again immediately via answeredCorrectly
-
-export async function reportQuestion(questionId) {
+// Records a report. The server switches the question off after 3 different students report it.
+export async function reportQuestion(questionId, studentId, token, reason = 'student_report') {
   try {
-    const { error } = await supabase
-      .from('question_bank')
-      .update({ is_active: false })
-      .eq('id', questionId);
-
-    if (error) {
-      console.error('reportQuestion error:', error);
-      return { success: false, error: error.message };
+    const { data, error } = await supabase.rpc('report_question', {
+      p_student: studentId, p_token: token, p_question: questionId, p_reason: reason,
+    });
+    if (error || !data?.ok) {
+      console.error('reportQuestion error:', error || data);
+      return { success: false, error: error?.message || data?.error || 'rejected' };
     }
     return { success: true };
   } catch (err) {
@@ -439,71 +369,36 @@ export async function reportQuestion(questionId) {
   }
 }
 
-// ── 11. SESSION TOKEN — Single login enforcement ─────────────────────────────
-
-// Generate and save a new session token on login
-export async function setSessionToken(studentId, token) {
-  try {
-    const { error } = await supabase
-      .from('students')
-      .update({ session_token: token })
-      .eq('id', studentId);
-    if (error) { console.error('setSessionToken error:', error); return false; }
-    return true;
-  } catch (err) {
-    console.error('setSessionToken exception:', err);
-    return false;
-  }
-}
-
-// Verify session token still matches Supabase
-// Returns true if valid, false if another device has logged in
+// ── 11. SESSION TOKEN — single login enforcement ─────────────────────────────
+// The token is created by the server at sign-in. This only checks it / clears it.
+// Returns true if still valid, false if another device has signed in.
 export async function verifySessionToken(studentId, token) {
   try {
-    const { data, error } = await supabase
-      .from('students')
-      .select('session_token')
-      .eq('id', studentId)
-      .single();
-    if (error) { console.error('verifySessionToken error:', error); return true; } // fail open
-    return data?.session_token === token;
+    const { data, error } = await supabase.rpc('verify_session', { p_student: studentId, p_token: token });
+    if (error) { console.error('verifySessionToken error:', error); return true; } // fail open on network error
+    return data === true;
   } catch (err) {
     console.error('verifySessionToken exception:', err);
-    return true; // fail open — don't log out on network error
+    return true;
   }
 }
 
-// Clear session token on logout
-export async function clearSessionToken(studentId) {
+export async function clearSessionToken(studentId, token) {
   try {
-    await supabase
-      .from('students')
-      .update({ session_token: null })
-      .eq('id', studentId);
+    await supabase.rpc('logout_student', { p_student: studentId, p_token: token });
   } catch (err) {
     console.error('clearSessionToken exception:', err);
   }
 }
 
 // ── 12. FETCH STUDENT SESSIONS ───────────────────────────────────────────────
-// Fetches last 50 sessions from Supabase for a student
-// Used to rebuild sessionHistory in localStorage on login
-
-export async function fetchStudentSessions(studentId) {
+export async function fetchStudentSessions(studentId, token) {
   try {
-    const { data, error } = await supabase
-      .from('session_logs')
-      .select('*')
-      .eq('student_id', studentId)
-      .gt('total_attempted', 0)  // only real sessions
-      .order('ended_at', { ascending: false })
-      .limit(50);
-
+    const { data, error } = await supabase.rpc('fetch_my_sessions', { p_student: studentId, p_token: token });
     if (error) {
       console.error('fetchStudentSessions error:', error);
       return [];
     }
-
     return (data || []).map(s => ({
       subject:           (s.subject || '').toLowerCase(),
       questionsAnswered: s.total_attempted,
