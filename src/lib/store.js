@@ -330,6 +330,16 @@ export const useStore = create(
           sessionToken: token,
           sessionHistory: [],
           lastSession:    null,
+          // A brand-new account starts empty — never inherit a previous
+          // student's cached progress, buddies or answered questions.
+          topicRecords:      {},
+          answeredCorrectly: {},
+          answeredWrongly:   {},
+          answeredRows:      [],
+          rewardState:       {},
+          activeSession:     null,
+          recentTopics:      [],
+          pendingSessions:   [],
         });
 
         return { user: newUser, pin: result.parentPin };
