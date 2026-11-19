@@ -72,6 +72,7 @@ export default function App() {
   const [screen, setScreen]               = useState('home');
   const [activeSubject, setActiveSubject] = useState(null);
   const [sessionResult, setSessionResult] = useState(null);
+  const [lostPractice, setLostPractice]   = useState(false);
   const { isLoggedIn, questionsCache, setQuestionsCache, trialDaysLeft } = useStore();
   const [questionsLoaded, setQuestionsLoaded] = useState(false);
 
@@ -139,11 +140,18 @@ export default function App() {
     // leaving a window where closing the tab (e.g. to switch browsers) could
     // cut off the Supabase save before it landed — the exact kind of gap
     // that made answers/rewards look missing on a different device.
-    await useStore.getState().endSession(
+    const ended = await useStore.getState().endSession(
       result.subject,
       result.questionsAnswered,
       result.level || '6'
     );
+    // The account was signed in on another device meanwhile: this practice
+    // could not be saved. Say so clearly instead of showing a normal result.
+    if (ended?.replaced) {
+      setLostPractice(true);
+      setScreen('kicked_out');
+      return;
+    }
     if (useStore.getState().syncWarning) {
       showToast('Progress will sync when your connection is back', '#b45309');
     }
@@ -179,7 +187,7 @@ export default function App() {
       {screen === 'auth_prompt'           && <AuthPrompt           setScreen={setScreen} goHome={goHome} mandatory={false} onContinue={() => { useStore.getState().markSoftPromptSeen(activeSubject); setScreen('practice'); }} />}
       {screen === 'auth_prompt_mandatory' && <AuthPrompt           setScreen={setScreen} goHome={goHome} mandatory={true} />}
       {screen === 'trial_expired'         && <TrialExpiredScreen   setScreen={setScreen} goHome={goHome} />}
-      {screen === 'kicked_out'            && <KickedOutScreen      setScreen={setScreen} goHome={goHome} />}
+      {screen === 'kicked_out'            && <KickedOutScreen      setScreen={setScreen} goHome={goHome} lost={lostPractice} />}
       {screen === 'forgot_password'       && <ForgotPasswordScreen setScreen={setScreen} goHome={goHome} />}
       {screen === 'forgot_pin'            && <ForgotPINScreen      setScreen={setScreen} goHome={goHome} />}
       {screen === 'parent_signin'         && <SigninScreen         setScreen={setScreen} goHome={goHome} parentOnly={true} />}
@@ -373,7 +381,7 @@ function SignupDone({ setScreen, goHome }) {
 }
 
 // ─── KICKED OUT ─────────────────────────────────────────────────────────────
-function KickedOutScreen({ setScreen, goHome }) {
+function KickedOutScreen({ setScreen, goHome, lost }) {
   return (
     <div style={{ minHeight:'100dvh', display:'flex', flexDirection:'column' }}>
       <div style={{ background:'linear-gradient(135deg,#1e1b4b,#4338ca)', padding:'32px 20px 48px', textAlign:'center' }}>
@@ -387,9 +395,13 @@ function KickedOutScreen({ setScreen, goHome }) {
       </div>
       <div style={{ flex:1, padding:'24px 20px', background:'#fff', borderTopLeftRadius:22, borderTopRightRadius:22, marginTop:-18 }}>
         <div style={{ background:'#fef3c7', borderRadius:16, padding:20, marginBottom:20, textAlign:'center' }}>
-          <div style={{ fontSize:13, fontWeight:700, color:'#92400e', marginBottom:4 }}>Your progress is saved</div>
+          <div style={{ fontSize:13, fontWeight:700, color:'#92400e', marginBottom:4 }}>
+            {lost ? "This practice couldn't be saved" : 'Your progress is saved'}
+          </div>
           <div style={{ fontSize:13, color:'#6b7280', lineHeight:1.6 }}>
-            All your answers and progress have been saved. Sign in again to continue.
+            {lost
+              ? 'You signed in on another device, so the practice you just finished could not be saved. Your earlier progress is safe. Sign in again to continue.'
+              : 'All your answers and progress have been saved. Sign in again to continue.'}
           </div>
         </div>
         <button style={{ width:'100%', padding:15, border:'none', borderRadius:13, background:'#4338ca', color:'#fff', fontFamily:'inherit', fontWeight:800, fontSize:15, cursor:'pointer', marginBottom:10 }}
