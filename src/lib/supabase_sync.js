@@ -70,10 +70,13 @@ export async function saveSession({
       p_easy: easyAttempted || 0, p_medium: mediumAttempted || 0, p_hard: hardAttempted || 0,
       p_duration: durationSeconds || 0,
     });
-    if (error || !data) {
+    if (error) {
       console.error('Session save error:', error);
-      return { success: false, error: error?.message || 'rejected' };
+      return { success: false, error: error.message || 'network' };
     }
+    // The server answers "nothing" when the session token is no longer valid,
+    // i.e. the student signed in somewhere else after this window.
+    if (!data) return { success: false, error: 'session_replaced' };
     return { success: true, sessionId: data };
   } catch (err) {
     console.error('Session save exception:', err);

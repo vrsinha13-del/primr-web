@@ -383,6 +383,7 @@ export const useStore = create(
             let sessionId = item.sessionId;
             if (!sessionId) {
               const r = await saveSession({ ...item.session, token: s.sessionToken });
+              if (r?.error === 'session_replaced') continue; // signed in elsewhere: drop it
               sessionId = r?.success ? r.sessionId : null;
             }
             if (!sessionId) { left.push(item); continue; }
@@ -522,7 +523,25 @@ export const useStore = create(
           // switches device right after finishing does not lose rows.
           // Any failure is retried once, then queued and retried next time.
           let saved = await saveSession(sessionPayload).catch(() => null);
+
+          // Signed in on another device since this window started: this practice
+          // cannot be saved. Sign out cleanly and tell the app to say so.
+          if (saved?.error === 'session_replaced') {
+            set({
+              user: null, isLoggedIn: false, sessionToken: null,
+              activeSession: null, syncWarning: false,
+            });
+            return { replaced: true };
+          }
+
           if (!saved?.success) saved = await saveSession(sessionPayload).catch(() => null);
+          if (saved?.error === 'session_replaced') {
+            set({
+              user: null, isLoggedIn: false, sessionToken: null,
+              activeSession: null, syncWarning: false,
+            });
+            return { replaced: true };
+          }
 
           let failed = null;
           if (!saved?.success || !saved.sessionId) {
@@ -561,6 +580,7 @@ export const useStore = create(
             lastPracticeDate: today,
           } : s.user,
         });
+        return { replaced: false };
       },
 
       // ── Guest limit check ────────────────────────────────────
