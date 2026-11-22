@@ -57,240 +57,58 @@ export async function changeParentPin(studentId, token, newPin) {
   }
 }
 
-// ── 2. SESSION SAVE ────────────────────────────────────────────────────────
-export async function saveSession({
-  studentId, token, subject, questionsAnswered, correct, wrong,
-  easyAttempted, mediumAttempted, hardAttempted, durationSeconds, level,
-}) {
-  if (!studentId || !token) return { success: false, error: 'No student session' };
+// ── 2. PRACTICE (all questions come from the server, a few at a time) ───────
+// practice_serve: sends the answers made so far and returns the next questions.
+// mode: 'start' (first batch), 'next' (refill), 'submit' (answers only).
+// Returns { ok:true, data } or { ok:false } when the network or server failed
+// (the caller keeps the answers and tries again).
+export async function practiceServe({ studentId, token, subject, sessionId, answers, mode }) {
   try {
-    const { data, error } = await supabase.rpc('save_session', {
-      p_student: studentId, p_token: token, p_subject: subject, p_level: level || '6',
-      p_total: questionsAnswered || 0, p_correct: correct || 0, p_wrong: wrong || 0,
-      p_easy: easyAttempted || 0, p_medium: mediumAttempted || 0, p_hard: hardAttempted || 0,
-      p_duration: durationSeconds || 0,
+    const { data, error } = await supabase.rpc('practice_serve', {
+      p_student: studentId, p_token: token, p_subject: subject,
+      p_session: sessionId || null, p_answers: answers || [], p_mode: mode,
     });
-    if (error) {
-      console.error('Session save error:', error);
-      return { success: false, error: error.message || 'network' };
-    }
-    // The server answers "nothing" when the session token is no longer valid,
-    // i.e. the student signed in somewhere else after this window.
-    if (!data) return { success: false, error: 'session_replaced' };
-    return { success: true, sessionId: data };
+    if (error || !data) { console.error('practice_serve error:', error); return { ok: false }; }
+    return { ok: true, data };
   } catch (err) {
-    console.error('Session save exception:', err);
-    return { success: false, error: err.message };
+    console.error('practice_serve exception:', err);
+    return { ok: false };
   }
 }
 
-// ── 3. SAVE STUDENT ANSWERS ─────────────────────────────────────────────────
-export async function saveAnswers(studentId, token, sessionId, answers) {
-  if (!studentId || !token || !sessionId || !answers?.length) return { success: false };
+export async function guestStart() {
   try {
-    const rows = answers.map(a => ({
-      question_id:    a.question_id,
-      subject:        a.subject,
-      topic:          a.topic,
-      difficulty:     a.difficulty,
-      question_level: a.question_level,
-      answer_given:   a.answer_given,
-      correct_answer: a.correct_answer,
-      is_correct:     a.is_correct,
-      time_taken_sec: a.time_taken_sec,
-      answered_at:    a.answered_at,
-    }));
-
-    // The server accepts up to 500 rows per call
-    let saved = 0;
-    for (let i = 0; i < rows.length; i += 500) {
-      const { data, error } = await supabase.rpc('save_answers', {
-        p_student: studentId, p_token: token, p_session: sessionId, p_rows: rows.slice(i, i + 500),
-      });
-      if (error || typeof data !== 'number' || data < 0) {
-        console.error('saveAnswers error:', error);
-        return { success: false, error: error?.message || 'rejected' };
-      }
-      saved += data;
-    }
-    return { success: true, count: saved };
+    const { data, error } = await supabase.rpc('guest_start');
+    if (error || !data?.guest_id) return { ok: false };
+    return { ok: true, guestId: data.guest_id, guestToken: data.guest_token };
   } catch (err) {
-    console.error('saveAnswers exception:', err);
-    return { success: false, error: err.message };
+    return { ok: false };
   }
 }
 
-// ── 3b. FETCH ANSWERED QUESTION HISTORY ─────────────────────────────────────
-// Rebuilds answeredCorrectly / answeredWrongly from the student's full answer
-// history, and returns the raw rows so store.js can rebuild topic records.
-// Paginated to avoid Supabase's 1000-row default limit.
-export async function fetchAnsweredHistory(studentId, token) {
-  const result = { answeredCorrectly: {}, answeredWrongly: {}, rows: [] };
-  if (!studentId || !token) return result;
-
+export async function guestServe({ guestId, guestToken, subject, answers, mode, softSeen }) {
   try {
-    let allRows = [];
-    let from    = 0;
-    const PAGE  = 1000;
-
-    while (true) {
-      const { data, error } = await supabase
-        .rpc('fetch_my_answers', { p_student: studentId, p_token: token })
-        .range(from, from + PAGE - 1);
-
-      if (error) {
-        console.error('fetchAnsweredHistory error:', error);
-        break;
-      }
-      if (!data || data.length === 0) break;
-      allRows = [...allRows, ...data];
-      if (data.length < PAGE) break;
-      from += PAGE;
-    }
-
-    result.rows = allRows;
-
-    // Oldest to newest: a later correct attempt overrides an earlier wrong one.
-    for (const row of allRows) {
-      if (!row.question_id) continue;
-      if (row.is_correct) {
-        result.answeredCorrectly[row.question_id] = true;
-        delete result.answeredWrongly[row.question_id];
-      } else if (!result.answeredCorrectly[row.question_id]) {
-        result.answeredWrongly[row.question_id] = 0;
-      }
-    }
-    return result;
+    const { data, error } = await supabase.rpc('guest_serve', {
+      p_guest: guestId, p_token: guestToken, p_subject: subject,
+      p_answers: answers || [], p_mode: mode, p_soft_seen: !!softSeen,
+    });
+    if (error || !data) { console.error('guest_serve error:', error); return { ok: false }; }
+    return { ok: true, data };
   } catch (err) {
-    console.error('fetchAnsweredHistory exception:', err);
-    return result;
+    console.error('guest_serve exception:', err);
+    return { ok: false };
   }
 }
 
-// ── 3. QUESTION FETCH ──────────────────────────────────────────────────────
-// Called on app load or when subject is selected
-// Loads questions from question_bank table
-// Falls back to local questions.js if Supabase fails
-
-export async function fetchQuestions(subject) {
+// Progress per topic (accuracy, difficulty, mastery) and buddies / monthly titles
+export async function fetchProgress(studentId, token) {
   try {
-    const today = new Date().toISOString().split('T')[0];
-
-    const { data, error } = await supabase
-      .from('question_bank')
-      .select('*')
-      .eq('subject', subject.charAt(0).toUpperCase() + subject.slice(1))
-      .eq('is_active', true)
-      .or(`is_evergreen.eq.true,expires_at.gt.${today}`)
-      .order('id');
-
-    if (error) {
-      console.error('Question fetch error:', error);
-      return { success: false, questions: [] };
-    }
-
-    // Normalise to engine format
-    // Engine expects: id, topic, question_level, difficulty, category,
-    //                 q (or question), opts (or option_a/b/c/d),
-    //                 ans (or answer), exp (or explanation)
-    const normalised = data.map(q => ({
-      id:             q.id,
-      subject:        q.subject?.toLowerCase(),
-      question_level: String(q.question_level || '6'),
-      chapter:        q.chapter,
-      category:       q.category,
-      topic:          q.topic,
-      difficulty:     q.difficulty?.toLowerCase(),
-      q:              q.question,
-      question:       q.question,
-      opts:           [q.option_a, q.option_b, q.option_c, q.option_d],
-      option_a:       q.option_a,
-      option_b:       q.option_b,
-      option_c:       q.option_c,
-      option_d:       q.option_d,
-      ans:            q.answer,
-      answer:         q.answer,
-      exp:            q.explanation,
-      explanation:    q.explanation,
-      is_evergreen:   q.is_evergreen,
-      expires_at:     q.expires_at,
-    }));
-
-    return { success: true, questions: normalised };
+    const { data, error } = await supabase.rpc('my_progress', { p_student: studentId, p_token: token });
+    if (error || !data || data.status !== 'ok') return { ok: false, status: data?.status };
+    return { ok: true, topics: data.topics || [], rewards: data.rewards || {}, subjectTotals: data.subject_totals || {} };
   } catch (err) {
-    console.error('Question fetch exception:', err);
-    return { success: false, questions: [] };
-  }
-}
-
-// ── 4. FETCH ALL SUBJECTS AT ONCE ──────────────────────────────────────────
-// Fetches each subject separately to avoid Supabase 1000-row default limit
-// Returns { maths: [...], reasoning: [...], english: [...], gk: [...] }
-
-export async function fetchAllQuestions() {
-  const today = new Date().toISOString().split('T')[0];
-
-  try {
-    const result = { maths: [], reasoning: [], english: [], gk: [] };
-
-    // Fetch each subject separately — avoids 1000 row limit
-    for (const [key, subjectName] of [['maths','Maths'],['reasoning','Reasoning'],['english','English'],['gk','GK']]) {
-      let allRows = [];
-      let from    = 0;
-      const PAGE  = 1000;
-
-      // Paginate until all rows fetched
-      while (true) {
-        const { data, error } = await supabase
-          .from('question_bank')
-          .select('*')
-          .eq('subject', subjectName)
-          .eq('is_active', true)
-          .order('id')
-          .range(from, from + PAGE - 1);
-
-        if (error) {
-          console.error(`Fetch ${subjectName} error:`, error);
-          break;
-        }
-
-        if (!data || data.length === 0) break;
-        allRows = [...allRows, ...data];
-        if (data.length < PAGE) break;  // last page
-        from += PAGE;
-      }
-
-      // Normalise
-      result[key] = allRows.map(q => ({
-        id:             q.id,
-        subject:        key,
-        question_level: String(q.question_level || '6'),
-        chapter:        q.chapter,
-        category:       q.category,
-        topic:          q.topic,
-        difficulty:     q.difficulty?.toLowerCase(),
-        q:              q.question,
-        question:       q.question,
-        opts:           [q.option_a, q.option_b, q.option_c, q.option_d],
-        option_a:       q.option_a,
-        option_b:       q.option_b,
-        option_c:       q.option_c,
-        option_d:       q.option_d,
-        ans:            q.answer,
-        answer:         q.answer,
-        exp:            q.explanation,
-        explanation:    q.explanation,
-        is_evergreen:   q.is_evergreen,
-        expires_at:     q.expires_at,
-      }));
-
-      console.log(`PRIMR: Loaded ${result[key].length} ${subjectName} questions`);
-    }
-
-    return result;
-  } catch (err) {
-    console.error('Fetch all exception:', err);
-    return null;
+    console.error('fetchProgress exception:', err);
+    return { ok: false };
   }
 }
 

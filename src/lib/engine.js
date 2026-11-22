@@ -716,9 +716,10 @@ function starsForVolume(count) {
 }
 
 // metric-star sum (6-15) -> weekly badge stars (3/4/5)
+// (the server works these out; kept here only for the "just N more" hints)
 function weeklyBadgeStars(metricStarSum) {
-  if (metricStarSum >= 14) return 5;
-  if (metricStarSum >= 11) return 4;
+  if (metricStarSum >= 11) return 5;
+  if (metricStarSum >= 8) return 4;
   return 3;
 }
 export function buddyStageFromWeeklyStars(weeklyStars) {
@@ -819,15 +820,28 @@ export function buddyNudgeMessage(subject, r) {
   if (r.buddyStage >= 3) return `Your ${rewards.buddy[2]} is fully grown this week! 🎉`;
 
   const nextBuddy = rewards.buddy[r.buddyStage];
-  const streakGoal = [3, 5, 7].find(t => t > r.daysThisWeek);
-  const volumeGoal = [31, 51, 71].find(t => t > r.volumeThisWeek);
-  const daysNeeded = streakGoal ? streakGoal - r.daysThisWeek : 0;
-  const qsNeeded   = volumeGoal ? volumeGoal - r.volumeThisWeek : 0;
-
+  // sum of the three measures needed for the next buddy: 8 for stage 2, 11 for stage 3
+  const target = r.buddyStage === 1 ? 8 : 11;
+  const accStars = starsForAccuracy(r.accuracyThisWeek);
   const candidates = [];
-  if (daysNeeded > 0) candidates.push({ n: daysNeeded, text: `${daysNeeded} more day${daysNeeded > 1 ? 's' : ''} of practice` });
-  if (qsNeeded   > 0) candidates.push({ n: qsNeeded,   text: `${qsNeeded} more question${qsNeeded > 1 ? 's' : ''}` });
-  if (candidates.length === 0) return `Keep your accuracy up to unlock your ${nextBuddy}! 🌟`;
+
+  // fewest extra days of practice that would be enough
+  for (let d = r.daysThisWeek + 1; d <= 7; d++) {
+    if (starsForStreak(d) + accStars + starsForVolume(r.volumeThisWeek) >= target) {
+      const n = d - r.daysThisWeek;
+      candidates.push({ n, text: `${n} more day${n > 1 ? 's' : ''} of practice` });
+      break;
+    }
+  }
+  // fewest extra questions that would be enough
+  for (const v of [31, 51, 71]) {
+    if (v > r.volumeThisWeek && starsForStreak(r.daysThisWeek) + accStars + starsForVolume(v) >= target) {
+      const n = v - r.volumeThisWeek;
+      candidates.push({ n, text: `${n} more question${n > 1 ? 's' : ''}` });
+      break;
+    }
+  }
+  if (candidates.length === 0) return `Keep practising and keep your accuracy up to unlock your ${nextBuddy}! 🌟`;
 
   candidates.sort((a, b) => a.n - b.n);
   return `Just ${candidates[0].text} and you'll unlock your ${nextBuddy}! 🌟`;
