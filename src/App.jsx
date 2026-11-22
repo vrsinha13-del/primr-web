@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { useStore, SUBJECTS } from './lib/store';
 import {
-  selectNextQuestion, sessionEndMessage, strengthSummary,
-  fullTopicBreakdown, checkTopicLevelUnlock,
+  sessionEndMessage, strengthSummary,
   getTimers, DIFF_LABEL,
   SUBJECT_REWARDS, buddyNudgeMessage, isTournamentQualified,
 } from './lib/engine';
-import { QB } from './lib/questions';
+import { PracticeClient, flushLeftoverAnswers } from './lib/practice_client';
+import { topicBreakdown } from './lib/progress_view';
 import { AuthPrompt, SignupScreen, SigninScreen, ForgotPasswordScreen, ForgotPINScreen } from './lib/auth_screens';
 
 const fmt = s => `${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
@@ -73,42 +73,22 @@ export default function App() {
   const [activeSubject, setActiveSubject] = useState(null);
   const [sessionResult, setSessionResult] = useState(null);
   const [lostPractice, setLostPractice]   = useState(false);
-  const { isLoggedIn, questionsCache, setQuestionsCache, trialDaysLeft } = useStore();
-  const [questionsLoaded, setQuestionsLoaded] = useState(false);
+  const { isLoggedIn, trialDaysLeft } = useStore();
 
   // Expose store for diagnostic access in console
   window.__primr = useStore;
 
   useEffect(() => {
-    async function loadQuestions() {
-      console.log('PRIMR: Loading questions from Supabase...');
-      try {
-        const { fetchAllQuestions } = await import('./lib/supabase_sync');
-        console.log('PRIMR: supabase_sync imported OK');
-        const cache = await fetchAllQuestions();
-        console.log('PRIMR: fetchAllQuestions result:', cache);
-        if (cache) {
-          setQuestionsCache(cache);
-          console.log('PRIMR: Questions loaded —',
-            Object.entries(cache).map(([k,v]) => `${k}:${v.length}`).join(', ')
-          );
-        } else {
-          console.warn('PRIMR: fetchAllQuestions returned null — check Supabase');
-        }
-      } catch (err) {
-        console.error('PRIMR: Question load failed:', err.message, err);
-      }
-      setQuestionsLoaded(true); // always mark as loaded even on error
-    }
-
     async function checkSession() {
-      if (isLoggedIn) {
-        const valid = await useStore.getState().verifySession();
-        if (!valid) setScreen('kicked_out');
-      }
+      const st = useStore.getState();
+      if (!st.isLoggedIn) return;
+      const valid = await st.verifySession();
+      if (!valid) { setScreen('kicked_out'); return; }
+      // answers left over from a closed tab or a lost connection, then fresh progress
+      const cur = useStore.getState();
+      await flushLeftoverAnswers(cur.user?.supabaseId, cur.sessionToken);
+      cur.refreshProgress();
     }
-
-    loadQuestions();
     checkSession();
   }, []);
 
@@ -124,11 +104,6 @@ export default function App() {
   const subj = SUBJECTS.find(s => s.id === activeSubject);
 
   function startSubject(sid) {
-    if (!questionsLoaded) {
-      // Questions still loading — wait
-      alert('Questions are still loading, please wait a moment and try again.');
-      return;
-    }
     useStore.getState().startSession(sid);
     setActiveSubject(sid);
     setScreen('practice');
@@ -136,23 +111,16 @@ export default function App() {
 
   async function onSessionEnd(result) {
     if (result.skipEndScreen) { goHome(); return; }
-    // Awaited: previously this fired endSession() and moved on immediately,
-    // leaving a window where closing the tab (e.g. to switch browsers) could
-    // cut off the Supabase save before it landed — the exact kind of gap
-    // that made answers/rewards look missing on a different device.
-    const ended = await useStore.getState().endSession(
-      result.subject,
-      result.questionsAnswered,
-      result.level || '6'
-    );
-    // The account was signed in on another device meanwhile: this practice
+    // The account was signed in on another device meanwhile: the last answers
     // could not be saved. Say so clearly instead of showing a normal result.
-    if (ended?.replaced) {
-      setLostPractice(true);
+    if (result.replaced) {
+      useStore.setState({ user: null, isLoggedIn: false, sessionToken: null, activeSession: null });
+      setLostPractice(!!result.lost || result.questionsAnswered > 0);
       setScreen('kicked_out');
       return;
     }
-    if (useStore.getState().syncWarning) {
+    await useStore.getState().endSession(result.subject, result.questionsAnswered, result.level || '6');
+    if (result.saved === false) {
       showToast('Progress will sync when your connection is back', '#b45309');
     }
     setSessionResult(result);
@@ -177,7 +145,7 @@ export default function App() {
         </div>
       )}
 
-      {screen === 'home'                  && <HomeScreen           setScreen={setScreen} startSubject={startSubject} questionsLoaded={questionsLoaded} />}
+      {screen === 'home'                  && <HomeScreen           setScreen={setScreen} startSubject={startSubject} />}
       {screen === 'practice'              && <PracticeScreen       setScreen={setScreen} subject={activeSubject} subj={subj} onEnd={onSessionEnd} onLoginRequired={onLoginRequired} />}
       {screen === 'session_end'           && <SessionEndScreen     setScreen={setScreen} result={sessionResult} subj={subj} startSubject={startSubject} goHome={goHome} />}
       {screen === 'report'                && <StudentReport        setScreen={setScreen} goHome={goHome} />}
@@ -187,6 +155,7 @@ export default function App() {
       {screen === 'auth_prompt'           && <AuthPrompt           setScreen={setScreen} goHome={goHome} mandatory={false} onContinue={() => { useStore.getState().markSoftPromptSeen(activeSubject); setScreen('practice'); }} />}
       {screen === 'auth_prompt_mandatory' && <AuthPrompt           setScreen={setScreen} goHome={goHome} mandatory={true} />}
       {screen === 'trial_expired'         && <TrialExpiredScreen   setScreen={setScreen} goHome={goHome} />}
+      {screen === 'daily_limit'           && <DailyLimitScreen     setScreen={setScreen} goHome={goHome} />}
       {screen === 'kicked_out'            && <KickedOutScreen      setScreen={setScreen} goHome={goHome} lost={lostPractice} />}
       {screen === 'forgot_password'       && <ForgotPasswordScreen setScreen={setScreen} goHome={goHome} />}
       {screen === 'forgot_pin'            && <ForgotPINScreen      setScreen={setScreen} goHome={goHome} />}
@@ -198,7 +167,7 @@ export default function App() {
 }
 
 // ─── HOME ──────────────────────────────────────────────────────────────────
-function HomeScreen({ setScreen, startSubject, questionsLoaded }) {
+function HomeScreen({ setScreen, startSubject }) {
   const { user, isLoggedIn, topicRecords, sessionHistory, lastSession, rewardState } = useStore();
   const name       = user?.name?.split(' ')[0] || 'Superstar';
   const hasHistory = isLoggedIn && sessionHistory.length > 0;
@@ -325,7 +294,7 @@ function HomeScreen({ setScreen, startSubject, questionsLoaded }) {
                 ) : sess > 0 && isLoggedIn ? (
                   <div style={{ fontSize:11, color:'#6b7280' }}>{sess} session{sess!==1?'s':''}</div>
                 ) : (
-                <div style={{ fontSize:11, color:'#9ca3af', fontStyle:'italic' }}>{questionsLoaded === false ? '⏳ Loading...' : 'Tap to start!'}</div>
+                <div style={{ fontSize:11, color:'#9ca3af', fontStyle:'italic' }}>Tap to start!</div>
                 )}
                 <div style={{ position:'absolute', bottom:12, right:12, width:26, height:26, borderRadius:7, background:s.light, display:'flex', alignItems:'center', justifyContent:'center', color:s.color, fontWeight:800, fontSize:13 }}>→</div>
               </div>
@@ -456,6 +425,29 @@ function TrialExpiredScreen({ setScreen, goHome }) {
   );
 }
 
+// ─── DAILY LIMIT ───────────────────────────────────────────────────────────
+function DailyLimitScreen({ setScreen, goHome }) {
+  return (
+    <div style={{ minHeight:'100dvh', display:'flex', flexDirection:'column' }}>
+      <div style={{ background:'linear-gradient(135deg,#1e1b4b,#4338ca)', padding:'32px 20px 48px', textAlign:'center' }}>
+        <div style={{ fontSize:56, marginBottom:8 }}>🌙</div>
+        <div style={{ fontFamily:"'Syne',system-ui", fontSize:24, fontWeight:800, color:'#fff', marginBottom:6 }}>Great work today!</div>
+        <div style={{ color:'rgba(255,255,255,0.85)', fontSize:14, lineHeight:1.6 }}>
+          You have practised a lot today. Rest your brain and come back tomorrow for more.
+        </div>
+      </div>
+      <div style={{ flex:1, padding:'24px 20px', background:'#fff', borderTopLeftRadius:22, borderTopRightRadius:22, marginTop:-18 }}>
+        <div style={{ background:'#f0effe', borderRadius:16, padding:20, marginBottom:16, textAlign:'center' }}>
+          <div style={{ fontSize:14, fontWeight:700, color:'#4338ca', marginBottom:4 }}>Your progress is saved</div>
+          <div style={{ fontSize:13, color:'#6b7280', lineHeight:1.6 }}>See your buddies and strengths while you wait for tomorrow.</div>
+        </div>
+        <button className="primary-btn" onClick={() => setScreen('report')}>📊 See My Progress</button>
+        <button className="secondary-btn" onClick={goHome}>Go to Home</button>
+      </div>
+    </div>
+  );
+}
+
 // Shows **bold** markers in question text as real bold (used by "bold sentence" questions)
 function RichText({ text }) {
   const parts = String(text == null ? '' : text).split(/(\*\*[^*]+\*\*)/g);
@@ -467,11 +459,11 @@ function RichText({ text }) {
 }
 
 // ─── PRACTICE ──────────────────────────────────────────────────────────────
+// Questions come from the server, a few at a time. The screen keeps a small
+// buffer ahead of the student, remembers answers until the server has them,
+// and keeps trying quietly when the connection is weak.
 function PracticeScreen({ setScreen, subject, subj, onEnd, onLoginRequired }) {
-  const { topicRecords, sessionHistory, isGuestLimited, guestStatus, recordAnswer, questionsCache, answeredCorrectly, answeredWrongly, recentTopics, isTrialExpired } = useStore();
-  const allQs = (questionsCache && questionsCache[subject]?.length > 0)
-    ? questionsCache[subject]
-    : (QB[subject] || []);
+  const { isTrialExpired, guestStatus } = useStore();
 
   const [current,   setCurrent]   = useState(null);
   const [selected,  setSelected]  = useState(null);
@@ -480,29 +472,98 @@ function PracticeScreen({ setScreen, subject, subj, onEnd, onLoginRequired }) {
   const [timer,     setTimer]     = useState(60);
   const [timerMax,  setTimerMax]  = useState(60);
   const [qCount,    setQCount]    = useState(0);
-  const timerRef = useRef(null);
+  const [, setTick]               = useState(0);        // re-draw when the client changes
+  const [notice,    setNotice]    = useState('');       // message instead of a question
+  const timerRef   = useRef(null);
+  const clientRef  = useRef(null);
+  const currentRef = useRef(null);
+  const leavingRef = useRef(false);
 
-  // Total answered for this subject (for adaptive threshold)
-  const totalSubjectAnswered = Object.keys(topicRecords)
-    .filter(k => k.startsWith(subject + '_'))
-    .reduce((sum, k) => sum + (topicRecords[k]?.answered || 0), 0);
+  useEffect(() => {
+    const st = useStore.getState();
+    const auth = st.isLoggedIn && st.user?.supabaseId
+      ? { kind: 'student', studentId: st.user.supabaseId, token: st.sessionToken }
+      : { kind: 'guest' };
+    const c = new PracticeClient({
+      subject, auth,
+      guestApi: {
+        get:      () => useStore.getState().guest,
+        create:   () => useStore.getState().createGuest(),
+        reset:    () => useStore.getState().resetGuest(),
+        softSeen: () => !!useStore.getState().softPromptSeen[subject],
+      },
+      onChange: () => setTick(t => t + 1),
+      onUnlock: (msg) => showLevelUpToast(msg),
+      onGuest:  (g) => useStore.getState().syncGuestCounts(subject, g.answered),
+    });
+    clientRef.current = c;
+    c.start();
+    return () => { c.destroy(); clearInterval(timerRef.current); };
+  }, []);
 
-  useEffect(() => { loadNext(); return () => clearInterval(timerRef.current); }, []);
+  // when a question is wanted and the buffer was empty, try again as soon as something arrives
+  useEffect(() => {
+    if (!currentRef.current && clientRef.current && !leavingRef.current) loadNext();
+  });
+
+  function setQuestion(res) {
+    currentRef.current = res;
+    setCurrent(res);
+  }
+
+  async function leaveTo(target, extra) {
+    // hand over the last answers, then go
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    clearInterval(timerRef.current);
+    const c = clientRef.current;
+    const r = await c.finish();
+    const level = c.lastLevel;
+    const answeredNow = c.answered;
+    if (target === 'end') {
+      onEnd({ subject, questionsAnswered: answeredNow, subj, level, saved: r.saved, replaced: r.replaced, lost: r.lost,
+              skipEndScreen: answeredNow === 0, ...extra });
+      return;
+    }
+    if (r.replaced) { onEnd({ subject, questionsAnswered: answeredNow, subj, level, replaced: true, lost: r.lost }); return; }
+    if (answeredNow > 0) await useStore.getState().endSession(subject, answeredNow, level);
+    else useStore.getState().endSession(subject, 0, level);
+    if (target === 'login_hard') onLoginRequired(true);
+    else if (target === 'login_soft') onLoginRequired(false);
+    else setScreen(target);
+  }
 
   function loadNext() {
-    // Check trial expired
-    if (isTrialExpired && isTrialExpired()) { setScreen('trial_expired'); return; }
+    const c = clientRef.current;
+    if (!c || leavingRef.current) return;
 
-    // Check guest limits
-    const status = guestStatus ? guestStatus(subject) : (isGuestLimited(subject) ? 'hard' : 'ok');
-    if (status === 'hard') { onLoginRequired(true); return; }
-    if (status === 'soft') { onLoginRequired(false); return; }
+    // trial over?
+    if (isTrialExpired && isTrialExpired()) { leaveTo('trial_expired'); return; }
 
-    const res = selectNextQuestion(allQs, topicRecords, totalSubjectAnswered, answeredCorrectly, answeredWrongly, subject, recentTopics || []);
-    if (!res) return;
-    const { question: q } = res;
+    // guest limits (the server enforces the hard limit too)
+    const status = guestStatus ? guestStatus(subject) : 'ok';
+    if (status === 'hard') { leaveTo('login_hard'); return; }
+    if (status === 'soft') { leaveTo('login_soft'); return; }
+
+    const q = c.take();
+    if (!q) {
+      // nothing ready: either still on the way, or the server said there is no more for now
+      setQuestion(null);
+      if (c.terminal === 'replaced')          { leaveTo('end', { replaced: true }); return; }
+      if (c.terminal === 'trial_ended')       { leaveTo('trial_expired'); return; }
+      if (c.terminal === 'daily_limit')       { leaveTo('daily_limit'); return; }
+      if (c.terminal === 'guest_limit')       { leaveTo('login_hard'); return; }
+      if (c.terminal === 'no_questions' || c.terminal === 'error') {
+        setNotice(c.answered > 0
+          ? 'You have seen everything we have for now. Great work! Come back soon for more.'
+          : 'We could not find a question for you right now. Please try again in a little while.');
+      }
+      return;
+    }
+
     const { shown } = getTimers(subject, q.category || '', q.difficulty || 'easy');
-    setCurrent(res);
+    setNotice('');
+    setQuestion({ question: q });
     setSelected(null);
     setAnswered(false);
     setIsLate(false);
@@ -533,54 +594,58 @@ function PracticeScreen({ setScreen, subject, subj, onEnd, onLoginRequired }) {
     const correct  = opt === ansText;
     const diff     = q.difficulty || 'easy';
     const category = q.category   || '';
-    const level    = String(q.question_level || q.level || q.grade || '6');
 
     const { mastery } = getTimers(subject, category, diff);
     const timeTaken   = timerMax - timer;
     const late        = mastery !== null ? (timeTaken > mastery || timer <= 0) : false;
 
-    // Find index of selected option for answer_given
-    const answerGivenLetter   = 'ABCD'[opts.indexOf(opt)];
-    const correctAnswerLetter = q.ans || q.answer || '';
+    const answerGivenLetter = 'ABCD'[opts.indexOf(opt)];
 
     setSelected(opt);
     setAnswered(true);
     setIsLate(late);
 
-    // Pass all params including answer letters and time taken
-    recordAnswer(
-      subject, q.topic, level, diff, category,
-      correct, late, q.id,
-      correctAnswerLetter, answerGivenLetter, timeTaken
-    );
+    // The server works out the score from the answer; the phone only remembers it until it is sent
+    clientRef.current.answer(q, answerGivenLetter, timeTaken, correct);
+    useStore.getState().recordLocalAnswer(subject, correct);
     setQCount(c => c + 1);
 
     showToast(correct
       ? OK_MSGS[Math.floor(Math.random() * OK_MSGS.length)]
       : WRONG_MSGS[Math.floor(Math.random() * WRONG_MSGS.length)]
     );
-
-    const unlock = checkTopicLevelUnlock(useStore.getState().topicRecords, subject, q.topic, category);
-    if (unlock.unlocked) setTimeout(() => showLevelUpToast(unlock.message), 800);
   }
 
-  function handlePracticeLater() {
-    clearInterval(timerRef.current);
-    const level    = current?.question?.question_level || current?.question?.level || current?.question?.grade || '6';
-    const answered = useStore.getState().activeSession?.questionsAnswered || qCount;
-    // If no questions answered — just go home, don't show session end screen
-    if (!answered || answered === 0) {
-      useStore.getState().endSession(subject, 0, level);
-      onEnd({ subject, questionsAnswered: 0, subj, level, skipEndScreen: true });
-      return;
-    }
-    onEnd({ subject, questionsAnswered: answered, subj, level });
-  }
+  function handlePracticeLater() { leaveTo('end'); }
+
+  const client = clientRef.current;
+
+  if (notice) return (
+    <div style={{ minHeight:'100dvh', display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:16, padding:24, textAlign:'center' }}>
+      <div style={{ fontSize:44 }}>🎉</div>
+      <div style={{ color:'#374151', fontWeight:700, lineHeight:1.6 }}>{notice}</div>
+      <button className="primary-btn" style={{ maxWidth:260 }} onClick={handlePracticeLater}>Done</button>
+    </div>
+  );
 
   if (!current) return (
-    <div style={{ minHeight:'100dvh', display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:16 }}>
-      <div className="spinner"/>
-      <div style={{ color:'#6b7280', fontWeight:600 }}>Loading questions…</div>
+    <div style={{ minHeight:'100dvh', display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:16, padding:24, textAlign:'center' }}>
+      {client?.waiting ? (
+        <>
+          <div style={{ fontSize:40 }}>📶</div>
+          <div style={{ color:'#374151', fontWeight:800, fontSize:16 }}>Waiting for connection…</div>
+          <div style={{ color:'#6b7280', fontWeight:600, fontSize:13, lineHeight:1.6, maxWidth:300 }}>
+            Your answers are safe. We will carry on as soon as the internet is back.
+          </div>
+          <button className="secondary-btn" style={{ maxWidth:220 }} onClick={() => client.retryNow()}>Try now</button>
+          <button style={{ background:'none', border:'none', color:'#6b7280', fontFamily:'inherit', fontWeight:700, fontSize:13, cursor:'pointer' }} onClick={handlePracticeLater}>Practice Later</button>
+        </>
+      ) : (
+        <>
+          <div className="spinner"/>
+          <div style={{ color:'#6b7280', fontWeight:600 }}>Getting your questions…</div>
+        </>
+      )}
     </div>
   );
 
@@ -600,7 +665,7 @@ function PracticeScreen({ setScreen, subject, subj, onEnd, onLoginRequired }) {
         <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
           <button className="back-btn" onClick={handlePracticeLater}>Practice Later</button>
           <div style={{ flex:1, textAlign:'center', fontSize:12, color:'rgba(255,255,255,0.85)', fontWeight:600 }}>
-            {subj?.short} · {qCount} answered
+            {subj?.short} · {qCount} answered{client?.waiting ? ' · 📶 reconnecting' : ''}
           </div>
           <span style={{ fontSize:18 }}>{subj?.icon}</span>
         </div>
@@ -663,8 +728,7 @@ function PracticeScreen({ setScreen, subject, subj, onEnd, onLoginRequired }) {
                 const st = useStore.getState();
                 const res = await reportQuestion(qId, st.user?.supabaseId, st.sessionToken, 'student_report');
                 if (!res?.success) throw new Error(res?.error || 'report failed');
-                // Hide it for this student only — does NOT count as an answer
-                st.skipQuestion(qId);
+                clientRef.current.drop(qId);
                 showToast('Question reported — thank you! 👍', '#6b7280');
                 loadNext();
               } catch(e) {
@@ -884,7 +948,7 @@ function ParentChangePin({ setScreen, goHome }) {
 
 // ─── PARENT DASHBOARD ───────────────────────────────────────────────────────
 function ParentDashboard({ setScreen, goHome }) {
-  const { topicRecords, sessionHistory, user } = useStore();
+  const { progressTopics, sessionHistory, user } = useStore();
   return (
     <div style={{ minHeight:'100dvh' }}>
       <div style={{ background:'linear-gradient(135deg,#1e1b4b,#4338ca)', padding:'20px 18px 40px' }}>
@@ -898,7 +962,7 @@ function ParentDashboard({ setScreen, goHome }) {
       </div>
       <div style={{ padding:'10px 16px 40px', marginTop:-12 }}>
         {SUBJECTS.map(subj => {
-          const breakdown = fullTopicBreakdown(topicRecords, subj.id);
+          const breakdown = topicBreakdown(progressTopics, subj.id);
           const sessCount = sessionHistory.filter(s => (s.subject||'').toLowerCase() === subj.id.toLowerCase()).length;
           const scores    = breakdown.filter(t => t.score !== null).map(t => t.score);
           const oa        = scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : null;
