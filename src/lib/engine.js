@@ -675,22 +675,22 @@ export function guestLimitReachedForSubject(guestCounts, subject) {
 export const SUBJECT_REWARDS = {
   maths: {
     buddy: ['Cub', 'Yearling', 'Bear'],
-    icon:  ['🐻', '🐻', '🐻'],
+    icon:  ['/buddies/maths_1.svg', '/buddies/maths_2.svg', '/buddies/maths_3.svg'],
     title: ['Solver', 'Cruncher', 'Mathlete'],
   },
   english: {
     buddy: ['Caterpillar', 'Cocoon', 'Butterfly'],
-    icon:  ['🐛', '🐛', '🦋'],
+    icon:  ['/buddies/english_1.svg', '/buddies/english_2.svg', '/buddies/english_3.svg'],
     title: ['Reader', 'Wordsmith', 'Author'],
   },
   reasoning: {
     buddy: ['Kit', 'Pup', 'Fox'],
-    icon:  ['🦊', '🦊', '🦊'],
+    icon:  ['/buddies/reasoning_1.svg', '/buddies/reasoning_2.svg', '/buddies/reasoning_3.svg'],
     title: ['Thinker', 'Analyst', 'Cracker'],
   },
   gk: {
     buddy: ['Egg', 'Hatchling', 'Frog'],
-    icon:  ['🥚', '🐣', '🐸'],
+    icon:  ['/buddies/gk_1.svg', '/buddies/gk_2.svg', '/buddies/gk_3.svg'],
     title: ['Quizzer', 'Whizkid', 'Wizard'],
   },
 };
