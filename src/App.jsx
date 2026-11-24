@@ -11,6 +11,11 @@ import { AuthPrompt, SignupScreen, SigninScreen, ForgotPasswordScreen, ForgotPIN
 
 const fmt = s => `${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
 const tl  = t => t.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+// A buddy's drawn picture (files live in public/buddies)
+function BuddyPic({ src, size }) {
+  return <img src={src} alt="" width={size} height={size} style={{ display:'block', margin:'0 auto' }} />;
+}
+
 const genPin = () => String(Math.floor(100000 + Math.random() * 900000));
 
 const OK_MSGS    = ["You got it! ⭐","Doing great! 🔥","Awesome! 🎉","Brilliant! 🚀","Keep it up! 💪","Superstar! 🌟","Nailed it! ✨","Amazing! 🏆"];
@@ -252,7 +257,7 @@ function HomeScreen({ setScreen, startSubject }) {
               return (
                 <div key={s.id} style={{ flex:1, background:'rgba(255,255,255,0.1)', borderRadius:12, padding:'10px 6px', textAlign:'center', cursor: isLoggedIn ? 'pointer' : 'default' }}
                   onClick={() => isLoggedIn && setScreen('report')}>
-                  <div style={{ fontSize:20, opacity: isLoggedIn && hasAny ? 1 : 0.4, filter: isLoggedIn && hasAny ? 'none' : 'grayscale(100%)' }}>{buddyIcon}</div>
+                  <div style={{ opacity: isLoggedIn && hasAny ? 1 : 0.4, filter: isLoggedIn && hasAny ? 'none' : 'grayscale(100%)' }}><BuddyPic src={buddyIcon} size={30} /></div>
                   <div style={{ fontFamily:"'Syne',system-ui", fontSize:11, fontWeight:700, color:'#fff', marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
                     {isLoggedIn ? (titleName || 'Start!') : '—'}
                   </div>
@@ -274,8 +279,8 @@ function HomeScreen({ setScreen, startSubject }) {
             return (
               <div key={s.id} className="subj-card" style={{ animationDelay:`${i * 60}ms`, borderTop:`4px solid ${s.color}` }} onClick={() => startSubject(s.id)}>
                 {buddyIcon && isLoggedIn && (
-                  <div style={{ position:'absolute', top:10, right:10, width:26, height:26, borderRadius:'50%', background:s.light, display:'flex', alignItems:'center', justifyContent:'center', fontSize:14 }} title={`${SUBJECT_REWARDS[s.id].buddy[rw.buddyStage - 1]} — this week's buddy`}>
-                    {buddyIcon}
+                  <div style={{ position:'absolute', top:10, right:10, width:26, height:26, borderRadius:'50%', background:s.light, display:'flex', alignItems:'center', justifyContent:'center' }} title={`${SUBJECT_REWARDS[s.id].buddy[rw.buddyStage - 1]} — this week's buddy`}>
+                    <BuddyPic src={buddyIcon} size={22} />
                   </div>
                 )}
                 <div style={{ width:46, height:46, borderRadius:12, background:s.color, display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, marginBottom:10, color:'#fff', boxShadow:`0 6px 14px ${s.color}55` }}>{s.icon}</div>
@@ -827,7 +832,7 @@ function StudentReport({ setScreen, goHome }) {
                         boxShadow: reached ? '0 4px 12px rgba(242,169,59,0.45)' : 'none',
                         transition:'background 0.6s ease, box-shadow 0.6s ease, border 0.6s ease',
                       }}>
-                        <div style={{ fontSize:26, filter: reached ? 'none' : 'grayscale(100%)', transition:'filter 0.6s ease' }}>{rewards.icon[idx]}</div>
+                        <div style={{ filter: reached ? 'none' : 'grayscale(100%)', transition:'filter 0.6s ease' }}><BuddyPic src={rewards.icon[idx]} size={42} /></div>
                       </div>
                       <div style={{ fontSize:10, fontWeight:700, color: reached ? '#B8760A' : '#9ca3af', marginTop:4 }}>{name}{reached && ' 🏅'}</div>
                     </div>
