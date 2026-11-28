@@ -112,6 +112,23 @@ export async function fetchProgress(studentId, token) {
   }
 }
 
+// Buddy history: the buddy earned in each past week, and how many fully grown ones
+export async function fetchBuddyHistory(studentId, token) {
+  try {
+    const { data, error } = await supabase.rpc('my_buddies', { p_student: studentId, p_token: token });
+    if (error || !data || data.status !== 'ok') return { ok: false };
+    return {
+      ok: true,
+      weeks:        data.weeks || [],
+      topBySubject: data.top_buddies_by_subject || {},
+      topTotal:     data.top_buddies_total || 0,
+    };
+  } catch (err) {
+    console.error('fetchBuddyHistory exception:', err);
+    return { ok: false };
+  }
+}
+
 // ── 5. FETCH CITIES ─────────────────────────────────────────────────────────
 // Returns unique list of cities from schools table — dynamic, no hardcoding
 

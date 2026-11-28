@@ -316,8 +316,18 @@ export const useStore = create(
         });
 
         // fresh progress, buddies and titles from the server
-        if (s.isLoggedIn && questionsAnswered > 0) await get().refreshProgress();
-        return { replaced: false };
+        // and tell the student when their buddy hatched or grew
+        let buddyChange = null;
+        if (s.isLoggedIn && questionsAnswered > 0) {
+          const before = s.rewardState?.[subject];
+          const fromStage = before?.hasAnyAnswer ? before.buddyStage : 0;
+          if (await get().refreshProgress()) {
+            const after = get().rewardState?.[subject];
+            const toStage = after?.hasAnyAnswer ? after.buddyStage : 0;
+            if (toStage > fromStage) buddyChange = { from: fromStage, to: toStage };
+          }
+        }
+        return { replaced: false, buddyChange };
       },
 
     }),
