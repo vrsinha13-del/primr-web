@@ -6,6 +6,7 @@ import {
   SUBJECT_REWARDS, buddyNudgeMessage, isTournamentQualified,
 } from './lib/engine';
 import { PracticeClient, flushLeftoverAnswers } from './lib/practice_client';
+import { fetchBuddyHistory } from './lib/supabase_sync';
 import { topicBreakdown } from './lib/progress_view';
 import { AuthPrompt, SignupScreen, SigninScreen, ForgotPasswordScreen, ForgotPINScreen } from './lib/auth_screens';
 
@@ -124,11 +125,11 @@ export default function App() {
       setScreen('kicked_out');
       return;
     }
-    await useStore.getState().endSession(result.subject, result.questionsAnswered, result.level || '6');
+    const ended = await useStore.getState().endSession(result.subject, result.questionsAnswered, result.level || '6');
     if (result.saved === false) {
       showToast('Progress will sync when your connection is back', '#b45309');
     }
-    setSessionResult(result);
+    setSessionResult({ ...result, buddyChange: ended?.buddyChange || null });
     setScreen('session_end');
   }
 
@@ -762,8 +763,21 @@ function SessionEndScreen({ setScreen, result, subj, startSubject, goHome }) {
   if (!result) { goHome(); return null; }
   const { subject, questionsAnswered } = result;
   const msg = sessionEndMessage(topicRecords, subject, questionsAnswered);
+  const bc  = result.buddyChange;
+  const br  = SUBJECT_REWARDS[subject];
   return (
     <div style={{ minHeight:'100dvh', background:'#f0effe', padding:'32px 16px 40px', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center' }}>
+      {bc && br && (
+        <div className="info-card" style={{ maxWidth:420, width:'100%', textAlign:'center', marginBottom:16, background:'linear-gradient(135deg,#FFF7DD,#FFE9A8)', border:'2px solid #F2A93B' }}>
+          <BuddyPic src={br.icon[bc.to - 1]} size={84} />
+          <div style={{ fontFamily:"'Syne',system-ui", fontSize:17, fontWeight:800, color:'#92400E', margin:'8px 0 4px' }}>
+            {bc.from === 0 ? `Your ${br.buddy[0]} has arrived! 🎉` : `Your ${br.buddy[bc.from - 1]} grew into a ${br.buddy[bc.to - 1]}! 🎉`}
+          </div>
+          <div style={{ fontSize:12.5, color:'#92400E', lineHeight:1.5 }}>
+            {bc.from === 0 ? 'Practise through the week to help it grow.' : bc.to >= 3 ? 'Fully grown this week. Amazing work!' : 'Keep going to help it grow even more.'}
+          </div>
+        </div>
+      )}
       <div className="info-card" style={{ maxWidth:420, width:'100%', textAlign:'center', marginBottom:16 }}>
         <div style={{ fontSize:64, marginBottom:12 }}>🌟</div>
         <div style={{ fontFamily:"'Syne',system-ui", fontSize:22, fontWeight:800, color:'#111', marginBottom:10 }}>{msg.main}</div>
@@ -787,8 +801,34 @@ function SessionEndScreen({ setScreen, result, subj, startSubject, goHome }) {
 }
 
 // ─── STUDENT REPORT ─────────────────────────────────────────────────────────
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const WEEK_DAYS = ['1–7', '8–14', '15–21', '22–end'];
+const stageFromStars = (stars) => (stars >= 5 ? 3 : stars >= 4 ? 2 : 1);
+
 function StudentReport({ setScreen, goHome }) {
-  const { topicRecords, sessionHistory, user, rewardState } = useStore();
+  const { topicRecords, sessionHistory, user, rewardState, sessionToken } = useStore();
+  const [hist, setHist]       = useState(null);   // buddy history from the server
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    let live = true;
+    if (user?.supabaseId && sessionToken) {
+      fetchBuddyHistory(user.supabaseId, sessionToken).then(h => { if (live && h.ok) setHist(h); });
+    }
+    return () => { live = false; };
+  }, [user?.supabaseId, sessionToken]);
+
+  // group the weekly rows into one line per week
+  const weekRows = [];
+  (hist?.weeks || []).forEach(r => {
+    const key = `${r.month}-${r.week}`;
+    let row = weekRows.find(x => x.key === key);
+    if (!row) {
+      const [y, m] = r.month.split('-');
+      row = { key, label: `${MONTHS[Number(m) - 1]} ${WEEK_DAYS[r.week - 1] || ''}, ${y}`, items: {} };
+      weekRows.push(row);
+    }
+    row.items[r.subject] = r.stars;
+  });
   return (
     <div style={{ minHeight:'100dvh' }}>
       <div style={{ background:'linear-gradient(135deg,#1e1b4b,#4338ca)', padding:'20px 18px 40px' }}>
@@ -813,7 +853,13 @@ function StudentReport({ setScreen, goHome }) {
             <div key={subj.id} className="info-card" style={{ marginBottom:14 }}>
               <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
                 <div style={{ width:38, height:38, borderRadius:10, background:subj.color, display:'flex', alignItems:'center', justifyContent:'center', fontSize:17, color:'#fff' }}>{subj.icon}</div>
-                <div style={{ fontFamily:"'Syne',system-ui", fontWeight:700, fontSize:14, color:'#111' }}>{subj.label}</div>
+                <div style={{ fontFamily:"'Syne',system-ui", fontWeight:700, fontSize:14, color:'#111', flex:1 }}>{subj.label}</div>
+                {hist && (
+                  <div style={{ fontSize:10.5, fontWeight:800, background:'#FEF3C7', color:'#92400E', padding:'5px 10px', borderRadius:20 }}
+                       title="Weeks when this buddy was fully grown">
+                    🏅 {hist.topBySubject?.[subj.id] || 0} fully grown
+                  </div>
+                )}
               </div>
 
               {/* Buddy evolution row — achieved stages shown in gold, locked stages greyed out */}
@@ -868,6 +914,39 @@ function StudentReport({ setScreen, goHome }) {
             </div>
           );
         })}
+
+        {/* Buddy history: the buddy earned in each past week */}
+        {hist && weekRows.length > 0 && (
+          <div className="info-card" style={{ marginBottom:14 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+              <div style={{ fontFamily:"'Syne',system-ui", fontSize:14, fontWeight:700, color:'#111' }}>📅 Buddy history</div>
+              <div style={{ fontSize:11, color:'#92400E', fontWeight:700 }}>🏅 {hist.topTotal} fully grown so far</div>
+            </div>
+            {(showAll ? weekRows : weekRows.slice(0, 6)).map(row => (
+              <div key={row.key} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop:'1px solid #f3f4f6' }}>
+                <div style={{ fontSize:11, color:'#6b7280', width:78, flexShrink:0, lineHeight:1.3 }}>{row.label}</div>
+                <div style={{ display:'flex', flex:1, justifyContent:'space-around' }}>
+                  {SUBJECTS.map(s => {
+                    const stars = row.items[s.id];
+                    return (
+                      <div key={s.id} style={{ width:44, textAlign:'center', opacity: stars ? 1 : 0.18 }}>
+                        {stars
+                          ? <BuddyPic src={SUBJECT_REWARDS[s.id].icon[stageFromStars(stars) - 1]} size={30} />
+                          : <div style={{ height:30, lineHeight:'30px', color:'#9ca3af' }}>–</div>}
+                        <div style={{ fontSize:9, color:'#9ca3af' }}>{s.short}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {weekRows.length > 6 && (
+              <button className="secondary-btn" style={{ marginTop:8, padding:'8px 0', fontSize:12 }} onClick={() => setShowAll(v => !v)}>
+                {showAll ? 'Show fewer' : 'Show all weeks'}
+              </button>
+            )}
+          </div>
+        )}
 
         <div style={{ fontFamily:"'Syne',system-ui", fontSize:15, fontWeight:700, color:'#1B1440', margin:'22px 0 10px' }}>Your Strengths</div>
         {SUBJECTS.map(subj => {
